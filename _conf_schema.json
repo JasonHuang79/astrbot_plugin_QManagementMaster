@@ -48,5 +48,11 @@
     "description": "是否忽略 OneBot 发送消息 retcode=1200 超时",
     "hint": "NapCat/SnowLuma 兼容端偶尔会在消息已发出后仍返回发送超时。开启后，发送群消息出现此类超时时按可能成功处理。",
     "default": true
+  },
+  "show_operator_in_broadcast": {
+    "type": "bool",
+    "description": "通报消息中是否显示执行人（操作者）",
+    "hint": "关闭后，播报群（log_group）的禁言/踢出/警告/撤销/黑名单拦截等通报以及执行群的警告消息将不再显示操作者QQ，避免暴露管理员身份。保存后 AstrBot 会自动热重载插件生效。",
+    "default": true
   }
 }

@@ -526,6 +526,12 @@ class GroupManagerPlugin(Star):
         conn.close()
         return record_id
 
+    def _operator_line(self, operator_qq: str, prefix: str = "操作者") -> str:
+        """生成通报消息中的执行人行；开关关闭时返回空串"""
+        if not self.config.get("show_operator_in_broadcast", True):
+            return ""
+        return f"{prefix}: {operator_qq}\n"
+
     async def broadcast_to_log_group(self, net_name: str, message: str):
         """向播报群发送消息"""
         groups = self._get_groups()
@@ -610,7 +616,8 @@ class GroupManagerPlugin(Star):
             time_str = f"{duration}分钟"
         broadcast_msg = (
             f"【禁言通知】\n记录ID: {record_id}\n目标: {target_qq}\n时长: {time_str}\n"
-            f"原因: {reason}\n操作者: {operator_qq}\n执行群: {', '.join(success_groups)}"
+            f"原因: {reason}\n{self._operator_line(operator_qq)}"
+            f"执行群: {', '.join(success_groups)}"
         )
         if failed_groups:
             broadcast_msg += f"\n失败群: {', '.join(failed_groups.keys())}"
@@ -688,7 +695,8 @@ class GroupManagerPlugin(Star):
         blacklist_text = "✅ 已加入黑名单" if add_blacklist else ""
         broadcast_msg = (
             f"【踢出通知】\n记录ID: {record_id}\n目标: {target_qq}\n原因: {reason}\n"
-            f"操作者: {operator_qq}\n执行群: {', '.join(success_groups)}\n{blacklist_text}"
+            f"{self._operator_line(operator_qq)}"
+            f"执行群: {', '.join(success_groups)}\n{blacklist_text}"
         )
         if failed_groups:
             broadcast_msg += f"\n失败群: {', '.join(failed_groups.keys())}"
@@ -731,7 +739,10 @@ class GroupManagerPlugin(Star):
             return
 
         # 在联动组执行群发送警告
-        warn_msg = f"⚠️ 警告\n用户: {target_qq}\n原因: {reason}\n操作者: {operator_qq}"
+        warn_msg = (
+            f"⚠️ 警告\n用户: {target_qq}\n原因: {reason}\n"
+            f"{self._operator_line(operator_qq)}"
+        ).rstrip()
 
         success_groups, failed_groups = await self._run_group_action(
             event,
@@ -749,7 +760,8 @@ class GroupManagerPlugin(Star):
         # 播报
         broadcast_msg = (
             f"【警告通知】\n记录ID: {record_id}\n目标: {target_qq}\n原因: {reason}\n"
-            f"操作者: {operator_qq}\n执行群: {', '.join(success_groups)}"
+            f"{self._operator_line(operator_qq)}"
+            f"执行群: {', '.join(success_groups)}"
         )
         if failed_groups:
             broadcast_msg += f"\n失败群: {', '.join(failed_groups.keys())}"
@@ -907,7 +919,7 @@ class GroupManagerPlugin(Star):
         # 播报
         broadcast_msg = (
             f"【撤销通知】\n记录ID: {record_id}\n类型: {action_type}\n目标: {target_qq}\n"
-            f"原处罚原因: {original_reason}\n撤销原因: {undo_reason}\n操作者: {operator_qq}"
+            f"原处罚原因: {original_reason}\n撤销原因: {undo_reason}\n{self._operator_line(operator_qq)}"
         )
         if action_type == "mute":
             broadcast_msg += f"\n解除禁言群: {', '.join(success_groups)}"
@@ -1165,7 +1177,7 @@ class GroupManagerPlugin(Star):
                     f"拦截群: {pure_gid}\n"
                     f"原处罚原因: {blacklist_entry.get('reason', '未知')}\n"
                     f"加入黑名单时间: {blacklist_entry.get('time', '未知')}\n"
-                    f"原操作者: {blacklist_entry.get('operator', '未知')}\n"
+                    f"{self._operator_line(blacklist_entry.get('operator', '未知'), prefix='原操作者')}"
                     f"已执行: 踢出 + 拉黑（禁止再次加群）"
                 )
                 await self.broadcast_to_log_group(net_name, broadcast_msg)
@@ -1265,7 +1277,7 @@ class GroupManagerPlugin(Star):
             broadcast_msg = (
                 f"✅ 【黑名单移除】\n"
                 f"目标QQ: {target_qq}\n"
-                f"操作者: {operator_qq}\n"
+                f"{self._operator_line(operator_qq)}"
                 f"备注: 该用户已从黑名单移除，可正常加群"
             )
             await self.broadcast_to_log_group(net_name, broadcast_msg)

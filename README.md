@@ -165,9 +165,12 @@ git clone https://github.com/Watanabehato/astrbot_plugin_QManagementMaster.git
       "reason": "原因",
       "time": "2026-06-17 10:00:00"
     }
-  ]
+  ],
+  "show_operator_in_broadcast": true
 }
 ```
+
+- `show_operator_in_broadcast`：通报消息是否显示执行人（操作者）。关闭后播报群不再收到操作者QQ，避免暴露管理员身份。
 
 ### 数据库 (`records.db`)
 - `id`：记录ID（自增主键）
@@ -225,6 +228,9 @@ git clone https://github.com/Watanabehato/astrbot_plugin_QManagementMaster.git
    - 黑名单用户尝试加群时会被自动踢出（需要机器人有管理员权限）
 
 ## 🔄 版本历史
+
+### v1.2.8 (2026-08-16)
+- ✨ 新增配置项 `show_operator_in_broadcast`：可关闭播报群通报消息中的执行人（操作者）显示，避免暴露管理员身份（默认开启，保持原行为）；同时覆盖 `/warn` 发到执行群的警告消息
 
 ### v1.2.7 (2026-07-08)
 - 🐛 `/mute` 不再固定取剩余参数第一个 token 作为时长，而是从清理后的参数中定位第一个合法时长；即使适配器残留 `@昵称(QQ)` / `[At:QQ]` / `[CQ:at,qq=QQ]` 等目标 token，也不会再误报“时长格式错误”
