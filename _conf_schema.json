@@ -54,5 +54,12 @@
     "description": "通报消息中是否显示执行人（操作者）",
     "hint": "关闭后，播报群（log_group）的禁言/踢出/警告/撤销/黑名单拦截等通报以及执行群的警告消息将不再显示操作者QQ，避免暴露管理员身份。保存后 AstrBot 会自动热重载插件生效。",
     "default": true
+  },
+  "default_scope": {
+    "type": "string",
+    "description": "未指定范围参数时处罚指令的默认执行范围",
+    "hint": "link：整组联动（旧行为，对所有执行群生效）；local：仅当前群（默认，更安全）。\n执行时可用范围参数覆盖：-all/联动 全组、-local/本群 仅本群、-g 群号,群号 指定群。",
+    "options": ["link", "local"],
+    "default": "local"
   }
 }

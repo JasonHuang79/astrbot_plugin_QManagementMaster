@@ -14,7 +14,7 @@ from astrbot.api.message_components import Plain, At
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 
-@register("QManagementMaster", "Watanabehato", "QQ多群联动违规管理插件", "1.2.7")
+@register("QManagementMaster", "Watanabehato", "QQ多群联动违规管理插件", "1.2.9")
 class GroupManagerPlugin(Star):
     _TEXT_AT_RE = re.compile(
         r"\[(?:At:|CQ:at,qq=)([0-9]+|all)(?:[^\]]*)\]|@[^()\s]+?\(([0-9]+)\)",
@@ -24,6 +24,14 @@ class GroupManagerPlugin(Star):
         "mute", "kick", "warn", "record", "undo", "g_join", "g_leave",
         "g_log", "g_list", "blacklist", "unblacklist", "gminfo",
     }
+
+    # 指令「范围参数」：限制联动处罚的执行范围
+    # 英文标记可在任意位置识别；中文标记仅在命令名后的第一个参数位识别，
+    # 避免把原因正文中的“本群/联动”等词误当作范围参数
+    SCOPE_LOCAL_MARKS = {"-local", "-l", "--local"}
+    SCOPE_ALL_MARKS = {"-all", "-a", "--all"}
+    SCOPE_LOCAL_WORDS = {"本群", "仅本群", "局部"}
+    SCOPE_ALL_WORDS = {"联动", "全组", "全部", "全部联动"}
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -208,6 +216,97 @@ class GroupManagerPlugin(Star):
             return int(raw[:-1]) * 1440
         return int(raw)
 
+    # ---------- 范围参数（仅本群 / 全组联动 / 指定群） ----------
+
+    @classmethod
+    def _parse_scope_gids(cls, raw: str) -> Optional[List[str]]:
+        """解析逗号分隔的群号列表（支持全角逗号），返回去重纯群号列表；
+        任何一项不是纯数字时返回 None（表示不是合法的群号参数）。"""
+        if not isinstance(raw, str):
+            return None
+        parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
+        if not parts:
+            return None
+        gids: List[str] = []
+        for part in parts:
+            if not part.isdigit():
+                return None
+            if part not in gids:
+                gids.append(part)
+        return gids
+
+    def _extract_scope(self, body: List[str]) -> tuple:
+        """从参数 token 中提取并移除范围参数，返回 (scope, cleaned)。
+
+        scope 取值：
+        - None      ：未指定，调用方按默认「全组联动」处理
+        - "local"   ：仅发起群
+        - "all"     ：整组全部执行群
+        - List[str] ：仅这些群（须属于该联动组的执行群）
+
+        头部参数位（命令名之后第一个参数）支持中英文标记：
+            /warn 本群 @目标 原因 / warn 联动 ... / 群:123,456
+        其余位置只识别英文短标记（-local / -all / -g 群号），避免误吞
+        原因正文中的中文词。多个范围标记同时出现时取最后一个生效。
+        """
+        scope = None
+        cleaned: List[str] = []
+        idx = 0
+        total = len(body)
+        while idx < total:
+            token = body[idx]
+            low = token.lower()
+            matched = False
+
+            # 任意位置：英文短标记
+            if low in self.SCOPE_LOCAL_MARKS:
+                scope = "local"
+                matched = True
+            elif low in self.SCOPE_ALL_MARKS:
+                scope = "all"
+                matched = True
+            elif low in ("-g", "--group"):
+                # -g <群号>：群号是下一个独立 token
+                if idx + 1 < total:
+                    gids = self._parse_scope_gids(body[idx + 1])
+                    if gids is not None:
+                        scope = gids
+                        idx += 1  # 连带吞掉群号 token
+                        matched = True
+            elif low.startswith("-g=") or low.startswith("--group="):
+                gids = self._parse_scope_gids(low.split("=", 1)[1])
+                if gids is not None:
+                    scope = gids
+                    matched = True
+            elif low.startswith("-g") and len(low) > 2 and not low.startswith("--"):
+                # 连写：-g123,456（无空格/等号）
+                gids = self._parse_scope_gids(low[2:])
+                if gids is not None:
+                    scope = gids
+                    matched = True
+
+            # 头部参数位：中文标记 / 群:123,456
+            if not matched and idx == 0:
+                if token in self.SCOPE_LOCAL_WORDS:
+                    scope = "local"
+                    matched = True
+                elif token in self.SCOPE_ALL_WORDS:
+                    scope = "all"
+                    matched = True
+                elif token.startswith("群:") or token.startswith("群="):
+                    raw = token.split(":", 1)[1] if ":" in token else token.split("=", 1)[1]
+                    gids = self._parse_scope_gids(raw)
+                    if gids is not None:
+                        scope = gids
+                        matched = True
+
+            if matched:
+                idx += 1
+                continue
+            cleaned.append(token)
+            idx += 1
+        return scope, cleaned
+
     @classmethod
     def _parse_text_at_token(cls, raw: str) -> Optional[str]:
         """解析文本化的 At 占位符，如 [At:123456]、[CQ:at,qq=123456] 或 @昵称(123456)。"""
@@ -328,8 +427,11 @@ class GroupManagerPlugin(Star):
         [At:QQ] 文本占位符。因此需要同时读取消息链组件并清理文本占位符。
         - 纯 QQ 号：目标占据命令名之后的第一个 token，剩余参数从其后开始。
 
-        统一在此归一，返回 (target_qq 或 None, remaining_args: List[str])，
-        remaining_args 不含命令名与目标 token。
+        命令名之后可带范围参数（-local/本群、-all/联动、-g 群号...），
+        见 _extract_scope 说明。
+
+        统一在此归一，返回 (target_qq 或 None, remaining_args, scope)：
+        remaining_args 不含命令名、范围参数与目标 token。
         """
         try:
             self_id = str(event.get_self_id())
@@ -338,6 +440,9 @@ class GroupManagerPlugin(Star):
 
         tokens = event.message_str.strip().split()
         body = self._body_without_command(tokens, self_id)  # tokens[0] 为命令名（如 /mute）
+
+        # 提取并移除范围参数（仅本群 / 全组联动 / 指定群）
+        scope, body = self._extract_scope(body)
 
         # 优先从消息链的 At 组件取目标：
         # - 跳过机器人自身的 @（@提及唤醒场景下 @bot 会先于目标出现，否则会误处罚机器人）
@@ -348,20 +453,20 @@ class GroupManagerPlugin(Star):
                 if self_id and at_qq == self_id:
                     continue
                 if at_qq.isdecimal():
-                    return at_qq, self._strip_text_at_tokens(body)
+                    return at_qq, self._strip_text_at_tokens(body), scope
 
         # 部分适配器会把 @ 以 [At:QQ] 形式留在 message_str 中，但消息链里不一定有 At 组件。
         if body:
             text_at_qq = self._parse_text_at_token(body[0])
             if text_at_qq and text_at_qq.isdecimal():
-                return text_at_qq, self._strip_text_at_tokens(body[1:])
+                return text_at_qq, self._strip_text_at_tokens(body[1:]), scope
 
         # 无有效 @提及：把命令名后的第一个 token 当作纯 QQ 号
         # 用 isdecimal 而非 isdigit，确保后续 int(target_qq) 不会崩溃
         if body and body[0].isdecimal():
-            return body[0], body[1:]
+            return body[0], body[1:], scope
 
-        return None, body
+        return None, body, scope
 
     async def get_group_network_async(self, group_id: str) -> Optional[tuple]:
         """获取群所属的网络组，返回 (组名, 组配置dict)
@@ -394,6 +499,43 @@ class GroupManagerPlugin(Star):
             result.append(pure_gid)
             seen.add(pure_gid)
         return result
+
+    def _default_scope_value(self) -> str:
+        """读取配置 default_scope 并归一为 'all'（整组联动）或 'local'（仅本群）。"""
+        raw = str(self.config.get("default_scope", "local")).strip().lower()
+        if raw in ("link", "all", "联动", "全组", "全组联动"):
+            return "all"
+        return "local"
+
+    def _apply_scope(self, all_exec: List[str], current_group: str, scope) -> tuple:
+        """按范围参数收敛执行群，返回 (目标执行群列表, 组外群号列表, 生效范围)。
+
+        scope 见 _extract_scope；未指定（None）时按 default_scope 配置决定
+        （默认仅本群）。生效范围用于播报标注：'all' / 'local' / List[str]。
+        """
+        if scope is None:
+            scope = self._default_scope_value()
+        if scope in ("all", "link"):
+            return all_exec, [], "all"
+        if scope == "local":
+            current = self._pure_gid(str(current_group))
+            chosen = [current] if current in all_exec else []
+            return chosen, [], "local"
+        if isinstance(scope, list):
+            wanted = set(scope)
+            chosen = [g for g in all_exec if g in wanted]
+            outside = sorted(g for g in wanted if g not in all_exec)
+            return chosen, outside, scope
+        return all_exec, [], "all"
+
+    @staticmethod
+    def _scope_broadcast_line(scope, exec_groups: List[str]) -> str:
+        """生成播报消息中的范围描述行；未指定（全组联动）时返回空串。"""
+        if scope == "local":
+            return "范围: 仅本群\n"
+        if isinstance(scope, list):
+            return f"范围: 指定群 {', '.join(exec_groups)}\n"
+        return ""
 
     async def _call_onebot_action(
         self,
@@ -561,7 +703,7 @@ class GroupManagerPlugin(Star):
             return
 
         # 解析参数（兼容 @提及 与纯 QQ 号）
-        target_qq, rest = self._parse_target_and_args(event)
+        target_qq, rest, scope = self._parse_target_and_args(event)
         if not target_qq:
             yield event.plain_result("❌ 无法识别目标用户，请@用户或输入QQ号")
             return
@@ -588,9 +730,12 @@ class GroupManagerPlugin(Star):
             return
 
         net_name, net_config = network_info
-        exec_groups = self._exec_group_ids(net_config)
+        all_exec_groups = self._exec_group_ids(net_config)
+        exec_groups, outside_groups, effective_scope = self._apply_scope(all_exec_groups, group_id, scope)
+        if outside_groups:
+            yield event.plain_result("⚠️ 指定群中 " + ", ".join(outside_groups) + " 不在该联动组执行群内，已忽略")
         if not exec_groups:
-            yield event.plain_result("❌ 当前联动组未配置执行群")
+            yield event.plain_result("❌ 无可执行的群（联动组未配置执行群，或指定群不在该联动组内）")
             return
 
         success_groups, failed_groups = await self._run_group_action(
@@ -615,7 +760,9 @@ class GroupManagerPlugin(Star):
         else:
             time_str = f"{duration}分钟"
         broadcast_msg = (
-            f"【禁言通知】\n记录ID: {record_id}\n目标: {target_qq}\n时长: {time_str}\n"
+            f"【禁言通知】\n"
+            f"{self._scope_broadcast_line(effective_scope, exec_groups)}"
+            f"记录ID: {record_id}\n目标: {target_qq}\n时长: {time_str}\n"
             f"原因: {reason}\n{self._operator_line(operator_qq)}"
             f"执行群: {', '.join(success_groups)}"
         )
@@ -632,7 +779,7 @@ class GroupManagerPlugin(Star):
             yield event.plain_result("❌ 权限不足，操作取消")
             return
 
-        target_qq, rest = self._parse_target_and_args(event)
+        target_qq, rest, scope = self._parse_target_and_args(event)
         if not target_qq:
             yield event.plain_result("❌ 无法识别目标用户，请@用户或输入QQ号")
             return
@@ -654,9 +801,12 @@ class GroupManagerPlugin(Star):
             return
 
         net_name, net_config = network_info
-        exec_groups = self._exec_group_ids(net_config)
+        all_exec_groups = self._exec_group_ids(net_config)
+        exec_groups, outside_groups, effective_scope = self._apply_scope(all_exec_groups, group_id, scope)
+        if outside_groups:
+            yield event.plain_result("⚠️ 指定群中 " + ", ".join(outside_groups) + " 不在该联动组执行群内，已忽略")
         if not exec_groups:
-            yield event.plain_result("❌ 当前联动组未配置执行群")
+            yield event.plain_result("❌ 无可执行的群（联动组未配置执行群，或指定群不在该联动组内）")
             return
 
         success_groups, failed_groups = await self._run_group_action(
@@ -694,7 +844,9 @@ class GroupManagerPlugin(Star):
         # 播报
         blacklist_text = "✅ 已加入黑名单" if add_blacklist else ""
         broadcast_msg = (
-            f"【踢出通知】\n记录ID: {record_id}\n目标: {target_qq}\n原因: {reason}\n"
+            f"【踢出通知】\n"
+            f"{self._scope_broadcast_line(effective_scope, exec_groups)}"
+            f"记录ID: {record_id}\n目标: {target_qq}\n原因: {reason}\n"
             f"{self._operator_line(operator_qq)}"
             f"执行群: {', '.join(success_groups)}\n{blacklist_text}"
         )
@@ -714,7 +866,7 @@ class GroupManagerPlugin(Star):
             yield event.plain_result("❌ 权限不足，操作取消")
             return
 
-        target_qq, rest = self._parse_target_and_args(event)
+        target_qq, rest, scope = self._parse_target_and_args(event)
         if not target_qq:
             yield event.plain_result("❌ 无法识别目标用户，请@用户或输入QQ号")
             return
@@ -733,9 +885,12 @@ class GroupManagerPlugin(Star):
             return
 
         net_name, net_config = network_info
-        exec_groups = self._exec_group_ids(net_config)
+        all_exec_groups = self._exec_group_ids(net_config)
+        exec_groups, outside_groups, effective_scope = self._apply_scope(all_exec_groups, group_id, scope)
+        if outside_groups:
+            yield event.plain_result("⚠️ 指定群中 " + ", ".join(outside_groups) + " 不在该联动组执行群内，已忽略")
         if not exec_groups:
-            yield event.plain_result("❌ 当前联动组未配置执行群")
+            yield event.plain_result("❌ 无可执行的群（联动组未配置执行群，或指定群不在该联动组内）")
             return
 
         # 在联动组执行群发送警告
@@ -759,7 +914,9 @@ class GroupManagerPlugin(Star):
 
         # 播报
         broadcast_msg = (
-            f"【警告通知】\n记录ID: {record_id}\n目标: {target_qq}\n原因: {reason}\n"
+            f"【警告通知】\n"
+            f"{self._scope_broadcast_line(effective_scope, exec_groups)}"
+            f"记录ID: {record_id}\n目标: {target_qq}\n原因: {reason}\n"
             f"{self._operator_line(operator_qq)}"
             f"执行群: {', '.join(success_groups)}"
         )
@@ -859,7 +1016,7 @@ class GroupManagerPlugin(Star):
         net_name, net_config = network_info
         exec_groups = self._exec_group_ids(net_config)
         if not exec_groups:
-            yield event.plain_result("❌ 当前联动组未配置执行群")
+            yield event.plain_result("❌ 无可执行的群（联动组未配置执行群，或指定群不在该联动组内）")
             return
 
         # 查询记录
